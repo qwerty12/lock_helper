@@ -52,13 +52,14 @@ static gboolean read_sysrq()
 {
     int fd = open(SYSRQ_PATH, O_RDONLY);
     if (fd == -1) {
-        perror("Failed to open sysrq for reading");
+        perror("Failed to open() " SYSRQ_PATH " for reading");
         return FALSE;
     }
 
     ssize_t nread = read(fd, orig_sysrq, sizeof(orig_sysrq));
     if (nread == -1) {
-        perror("Failed to read sysrq");
+        perror("Failed to read() " SYSRQ_PATH);
+        close(fd);
         return FALSE;
     }
     close(fd);
@@ -72,13 +73,12 @@ static void write_sysrq(const char *val)
 {
     int fd = open(SYSRQ_PATH, O_WRONLY);
     if (fd == -1) {
-        perror("Failed to open sysrq for writing");
-        close(fd);
+        perror("Failed to open() " SYSRQ_PATH " for writing");
         return;
     }
 
     if (write(fd, val, strlen(val)) == -1)
-        perror("Failed to write sysrq");
+        perror("Failed to write() " SYSRQ_PATH);
 
     close(fd);
 }
@@ -145,7 +145,7 @@ static gboolean must_we_mess_with_x11s_layout(gchar **extra_options)
     return has_terminate_ctrl_alt_bksp;
 }
 
-static void mess_with_x11s_layout(gboolean add)
+static void mess_with_x11s_layout(gboolean remove)
 {
     pid_t pid = fork();
 
@@ -166,10 +166,10 @@ static void mess_with_x11s_layout(gboolean add)
                     if (xkb_var_defs.options)
                         free(xkb_var_defs.options);
 
-                    if (add)
-                        xkb_var_defs.options = extra_x11_layout_options ? g_strconcat(MAGIC_TERMINATE_OPTION, ",", extra_x11_layout_options, NULL) : g_strdup(MAGIC_TERMINATE_OPTION);
-                    else
+                    if (remove)
                         xkb_var_defs.options = g_strdup(extra_x11_layout_options);
+                    else
+                        xkb_var_defs.options = extra_x11_layout_options ? g_strconcat(MAGIC_TERMINATE_OPTION, ",", extra_x11_layout_options, NULL) : g_strdup(MAGIC_TERMINATE_OPTION);
 
                     XkbRF_RulesRec *xkb_rules = XkbRF_Load(rules_file_path, NULL, True, True);
                     if (xkb_rules) {
@@ -238,7 +238,7 @@ static void wtfkde()
             dup2(fd, STDERR_FILENO);
             close(fd);
 
-            execl("/usr/bin/kcminit", "/usr/bin/kcminit", "kcm_touchpad", NULL);
+            execl("/usr/bin/kcminit", "kcminit", "kcm_touchpad", NULL);
         }
         exit(EXIT_FAILURE);
     } else if (pid > 0) {
@@ -253,11 +253,11 @@ static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G
         gboolean locked;
         g_variant_get(parameters, "(b)", &locked);
 
-        if (modify_x11_layout_options)
-            mess_with_x11s_layout(!locked);
+        lockVT(locked);
         if (modify_sysrq)
             write_sysrq(locked ? "0" : orig_sysrq);
-        lockVT(locked);
+        if (modify_x11_layout_options)
+            mess_with_x11s_layout(locked);
         if (!locked)
             wtfkde();
     }
