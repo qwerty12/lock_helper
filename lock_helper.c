@@ -27,6 +27,7 @@ static char orig_sysrq[4];
 static gboolean modify_sysrq;
 static gboolean modify_x11_layout_options;
 static gchar *extra_x11_layout_options = NULL;
+static unsigned short owning_tty = 0;
 
 static void cleanup()
 {
@@ -83,18 +84,64 @@ static void write_sysrq(const char *val)
     close(fd);
 }
 
-static void lockVT(gboolean lock)
+static void lock_vt(gboolean lock)
 {
     // Thanks to sflock
-    if (term == -1) {
-        if ((term = open("/dev/console", O_RDWR)) == -1) {
-            perror("error opening console");
-            return;
-        }
-    }
-
     if (ioctl(term, lock ? VT_LOCKSWITCH : VT_UNLOCKSWITCH) == -1)
         perror("VT_(UN)LOCKSWITCH");
+}
+
+static void wtfkde()
+{
+    // Thanks to the authors of the many SO answers I looked at just to get this
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        if (setuid(orig_user) != -1) {
+            int fd = open("/dev/null", O_WRONLY);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+
+            execl("/usr/bin/kcminit", "kcminit", "kcm_touchpad", NULL);
+        }
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+gpointer watch_for_vt_changes(gpointer data G_GNUC_UNUSED)
+{
+	// Taken from vtchs
+	struct vt_event e = { .event = VT_EVENT_SWITCH, 0 };
+
+	for (;;) {
+		if (ioctl(term, VT_WAITEVENT, &e) == -1)
+			return NULL;
+		if (e.newev == owning_tty) {
+			sleep(1);
+			wtfkde();
+		}
+	}
+
+	return NULL;
+}
+
+static void prepare_watch_for_vt_changes()
+{
+	struct vt_stat s = { 0 };
+
+	if (ioctl(term, VT_GETSTATE, &s) == -1)
+		return;
+
+	if (s.v_active == 0)
+		return;
+
+	owning_tty = s.v_active;
+
+	g_thread_unref(g_thread_try_new(NULL, watch_for_vt_changes, NULL, NULL));
 }
 
 static gboolean must_we_mess_with_x11s_layout(gchar **extra_options)
@@ -226,34 +273,13 @@ static void mess_with_x11s_layout(gboolean remove)
     }
 }
 
-static void wtfkde()
-{
-    // Thanks to the authors of the many SO answers I looked at just to get this
-    pid_t pid = fork();
-
-    if (pid == 0) {
-        if (setuid(orig_user) != -1) {
-            int fd = open("/dev/null", O_WRONLY);
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-
-            execl("/usr/bin/kcminit", "kcminit", "kcm_touchpad", NULL);
-        }
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
-    }
-}
-
 static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G_GNUC_UNUSED, gchar *signal_name, GVariant *parameters, gpointer user_data G_GNUC_UNUSED)
 {
     if (!g_strcmp0(signal_name, "ActiveChanged")) {
         gboolean locked;
         g_variant_get(parameters, "(b)", &locked);
 
-        lockVT(locked);
+        lock_vt(locked);
         if (modify_sysrq)
             write_sysrq(locked ? "0" : orig_sysrq);
         if (modify_x11_layout_options)
@@ -293,6 +319,13 @@ int main()
         return EXIT_FAILURE;
     }
     setuid(0);
+
+    if ((term = open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
+        perror("error opening console");
+        return EXIT_FAILURE;
+    }
+
+    prepare_watch_for_vt_changes();
 
     g_main_loop_run(loop);
 
