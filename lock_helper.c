@@ -14,12 +14,13 @@
 
 #include <glib.h>
 #include <glib-unix.h>
+#include <glib/gstdio.h>
 #include <gio/gio.h>
 
 #define SYSRQ_PATH "/proc/sys/kernel/sysrq"
 #define MAGIC_TERMINATE_OPTION "terminate:ctrl_alt_bksp"
 
-static uid_t orig_user = -1;
+static uid_t orig_user;
 static GMainLoop *loop = NULL;
 static GDBusProxy *screensaver_proxy = NULL;
 static int term = -1;
@@ -32,7 +33,7 @@ static unsigned short owning_tty = 0;
 static void cleanup()
 {
     if (term != -1) {
-        close(term);
+        g_close(term, NULL);
         term = -1;
     }
     setuid(orig_user);
@@ -51,7 +52,7 @@ static gboolean on_sigint(gpointer data_ptr G_GNUC_UNUSED)
 
 static gboolean read_sysrq()
 {
-    int fd = open(SYSRQ_PATH, O_RDONLY);
+    int fd = g_open(SYSRQ_PATH, O_RDONLY);
     if (fd == -1) {
         perror("Failed to open() " SYSRQ_PATH " for reading");
         return FALSE;
@@ -60,10 +61,10 @@ static gboolean read_sysrq()
     ssize_t nread = read(fd, orig_sysrq, sizeof(orig_sysrq));
     if (nread == -1) {
         perror("Failed to read() " SYSRQ_PATH);
-        close(fd);
+        g_close(fd, NULL);
         return FALSE;
     }
-    close(fd);
+    g_close(fd, NULL);
 
     orig_sysrq[nread] = '\0';
 
@@ -72,7 +73,7 @@ static gboolean read_sysrq()
 
 static void write_sysrq(const char *val)
 {
-    int fd = open(SYSRQ_PATH, O_WRONLY);
+    int fd = g_open(SYSRQ_PATH, O_WRONLY);
     if (fd == -1) {
         perror("Failed to open() " SYSRQ_PATH " for writing");
         return;
@@ -81,7 +82,7 @@ static void write_sysrq(const char *val)
     if (write(fd, val, strlen(val)) == -1)
         perror("Failed to write() " SYSRQ_PATH);
 
-    close(fd);
+    g_close(fd, NULL);
 }
 
 static void lock_vt(gboolean lock)
@@ -91,25 +92,16 @@ static void lock_vt(gboolean lock)
         perror("VT_(UN)LOCKSWITCH");
 }
 
+static void child_setup(gpointer user_data G_GNUC_UNUSED)
+{
+	if (setuid(orig_user) != 0)
+		exit(EXIT_FAILURE);
+}
+
 static void wtfkde()
 {
-    // Thanks to the authors of the many SO answers I looked at just to get this
-    pid_t pid = fork();
-
-    if (pid == 0) {
-        if (setuid(orig_user) != -1) {
-            int fd = open("/dev/null", O_WRONLY);
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-
-            execl("/usr/bin/kcminit", "kcminit", "kcm_touchpad", NULL);
-        }
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
-        int status;
-        waitpid(pid, &status, 0);
-    }
+    gchar *argv[] = { "/usr/bin/kcminit", "kcm_touchpad" };
+    g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, child_setup, NULL, NULL, NULL);
 }
 
 gpointer watch_for_vt_changes(gpointer data G_GNUC_UNUSED)
@@ -320,7 +312,7 @@ int main()
     }
     setuid(0);
 
-    if ((term = open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
+    if ((term = g_open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
         perror("error opening console");
         return EXIT_FAILURE;
     }
