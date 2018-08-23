@@ -28,7 +28,8 @@ static char orig_sysrq[4];
 static gboolean modify_sysrq;
 static gboolean modify_x11_layout_options;
 static gchar *extra_x11_layout_options = NULL;
-static unsigned short owning_tty = 0;
+static gchar owning_tty[8];
+static guint active_vt_watch_id = 0;
 
 static void cleanup()
 {
@@ -39,6 +40,10 @@ static void cleanup()
     setuid(orig_user);
     seteuid(orig_user);
 
+    if (active_vt_watch_id) {
+        g_source_remove(active_vt_watch_id);
+        active_vt_watch_id = 0;
+    }
     g_clear_pointer(&screensaver_proxy, g_object_unref);
     g_clear_pointer(&loop, g_main_loop_unref);
     g_clear_pointer(&extra_x11_layout_options, g_free);
@@ -88,6 +93,12 @@ static void write_sysrq(const char *val)
 static void lock_vt(gboolean lock)
 {
     // Thanks to sflock
+    if (term == -1)
+        if ((term = g_open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
+            perror("error opening console");
+            return;
+        }
+
     if (ioctl(term, lock ? VT_LOCKSWITCH : VT_UNLOCKSWITCH) == -1)
         perror("VT_(UN)LOCKSWITCH");
 }
@@ -100,40 +111,63 @@ static void child_setup(gpointer user_data G_GNUC_UNUSED)
 
 static void wtfkde()
 {
-    gchar *argv[] = { "/usr/bin/kcminit", "kcm_touchpad" };
+    gchar *argv[] = { "/usr/bin/kcminit", "kcm_touchpad", NULL };
     g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, child_setup, NULL, NULL, NULL);
 }
 
-gpointer watch_for_vt_changes(gpointer data G_GNUC_UNUSED)
+static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpointer data G_GNUC_UNUSED)
 {
-	// Taken from vtchs
-	struct vt_event e = { .event = VT_EVENT_SWITCH, 0 };
+	gchar new_tty[sizeof(owning_tty)] = { '\0' };
+	g_io_channel_seek_position(source, 0, G_SEEK_SET, NULL);
 
-	for (;;) {
-		if (ioctl(term, VT_WAITEVENT, &e) == -1)
-			return NULL;
-		if (e.newev == owning_tty) {
-			sleep(1);
-			wtfkde();
+	if (condition & G_IO_PRI) {
+		switch (g_io_channel_read_chars(source, new_tty, sizeof(new_tty), NULL, NULL)) {
+			case G_IO_STATUS_ERROR:
+			case G_IO_STATUS_EOF:
+				return G_SOURCE_REMOVE;
+			case G_IO_STATUS_AGAIN:
+				return G_SOURCE_CONTINUE;
+			case G_IO_STATUS_NORMAL:
+				break;
 		}
 	}
 
-	return NULL;
+#if 0
+	if ((condition & G_IO_ERR) || (condition & G_IO_HUP)) {
+		g_debug("kernel hung up active vt watch");
+		return G_SOURCE_REMOVE;
+	}
+#endif
+
+	if (*new_tty == '\0') {
+		g_debug("unable to read active VT from kernel");
+		return G_SOURCE_CONTINUE;
+	}
+
+	if (!g_strcmp0(g_strchomp(new_tty), owning_tty)) {
+		sleep(1);
+		wtfkde();
+	}
+
+	return G_SOURCE_CONTINUE;
 }
 
 static void prepare_watch_for_vt_changes()
 {
-	struct vt_stat s = { 0 };
+	// Stolen from GDM
+	GIOChannel *io_channel = g_io_channel_unix_new(g_open("/sys/class/tty/tty0/active", O_RDONLY | O_NOCTTY | O_CLOEXEC));
+	if (io_channel) {
+		g_io_channel_set_close_on_unref(io_channel, TRUE);
+		g_io_channel_set_encoding(io_channel, NULL, NULL);
+		g_io_channel_seek_position(io_channel, 0, G_SEEK_SET, NULL);
 
-	if (ioctl(term, VT_GETSTATE, &s) == -1)
-		return;
+		if (g_io_channel_read_chars(io_channel, owning_tty, sizeof(owning_tty), NULL, NULL) == G_IO_STATUS_NORMAL) {
+			g_strchomp(owning_tty);
+			active_vt_watch_id = g_io_add_watch(io_channel, G_IO_PRI, on_vt_changed, NULL);
+		}
 
-	if (s.v_active == 0)
-		return;
-
-	owning_tty = s.v_active;
-
-	g_thread_unref(g_thread_try_new(NULL, watch_for_vt_changes, NULL, NULL));
+		g_io_channel_unref(io_channel);
+	}
 }
 
 static gboolean must_we_mess_with_x11s_layout(gchar **extra_options)
@@ -302,6 +336,8 @@ int main()
     }
     g_signal_connect(screensaver_proxy, "g-signal", G_CALLBACK(on_screensaver), NULL);
 
+    prepare_watch_for_vt_changes();
+
     loop = g_main_loop_new(NULL, FALSE);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
@@ -311,13 +347,6 @@ int main()
         return EXIT_FAILURE;
     }
     setuid(0);
-
-    if ((term = g_open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
-        perror("error opening console");
-        return EXIT_FAILURE;
-    }
-
-    prepare_watch_for_vt_changes();
 
     g_main_loop_run(loop);
 
