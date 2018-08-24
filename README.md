@@ -4,6 +4,7 @@ This does the following when locking your screen in KDE (and maybe with other DE
 * Disables the Ctrl+Alt+Bksp X server killing sequence if enabled
 * Disables the Magic SysRq key if enabled
 * Locks VT switching; Ctrl+Alt+F1 etc. will have no effect
+* Mutes the default PulseAudio sink
 * Runs `kcm_init touchpad` upon unlock to workaround an annoying KDE bug as of lately in that your touchpad settings like Natural Scrolling are discarded
 
 Naturally, this is all reversed on unlock.
@@ -20,7 +21,7 @@ Naturally, this is all reversed on unlock.
 # Installation
 
 ```
-cc -Wall -O2 `pkg-config --cflags --libs xkbfile x11 gio-unix-2.0` -DXKB_BASE=\"$(pkg-config --variable xkb_base xkeyboard-config)\" lock_helper.c -o lock_helper
+cc -Wall -O2 `pkg-config --cflags --libs xkbfile x11 gio-unix-2.0 libpulse-mainloop-glib` -DXKB_BASE=\"$(pkg-config --variable xkb_base xkeyboard-config)\" lock_helper.c -o lock_helper
 sudo install --group=root --mode=4755 --owner=root --strip ./lock_helper /usr/local/sbin/
 ```
 

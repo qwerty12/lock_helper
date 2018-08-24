@@ -17,6 +17,9 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 
+#include <pulse/pulseaudio.h>
+#include <pulse/glib-mainloop.h>
+
 #define SYSRQ_PATH "/proc/sys/kernel/sysrq"
 #define MAGIC_TERMINATE_OPTION "terminate:ctrl_alt_bksp"
 
@@ -24,12 +27,60 @@ static uid_t orig_user;
 static GMainLoop *loop = NULL;
 static GDBusProxy *screensaver_proxy = NULL;
 static int term = -1;
+
 static char orig_sysrq[4];
 static gboolean modify_sysrq;
+
 static gboolean modify_x11_layout_options;
 static gchar *extra_x11_layout_options = NULL;
+
 static gchar owning_tty[8];
 static guint active_vt_watch_id = 0;
+
+static gboolean pulse_ready = FALSE;
+static pa_glib_mainloop *pa_loop = NULL;
+static pa_context *pa_ctx = NULL;
+
+static void deinit_pulse()
+{
+    if (pa_ctx) {
+        pa_context_disconnect(pa_ctx);
+        g_clear_pointer(&pa_ctx, pa_context_unref);
+    }
+
+    g_clear_pointer(&pa_loop, pa_glib_mainloop_free);
+}
+
+static void pa_server_info_callback(pa_context *context, const pa_server_info *i, void *userdata G_GNUC_UNUSED)
+{
+    if (i->default_sink_name)
+        pa_operation_unref(pa_context_set_sink_mute_by_name(context, i->default_sink_name, 1, NULL, NULL));
+}
+
+static void context_state_callback(pa_context *context, void *userdata G_GNUC_UNUSED)
+{
+    pulse_ready = pa_context_get_state(context) == PA_CONTEXT_READY;
+}
+
+static void mute_sound()
+{
+    // Many thanks to https://kdekorte.blogspot.com/2010/11/getting-default-volume-from-pulseaudio.html
+    if (pulse_ready)
+        pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, NULL));
+}
+
+static void init_pulse()
+{
+    if (!pa_loop)
+        pa_loop = pa_glib_mainloop_new(NULL);
+
+    if (!pa_ctx) {
+        if ((pa_ctx = pa_context_new(pa_glib_mainloop_get_api(pa_loop), "LockHelper"))) {
+            pa_context_connect(pa_ctx, NULL, PA_CONTEXT_NOAUTOSPAWN, NULL);
+            pa_context_set_state_callback(pa_ctx, context_state_callback, NULL);
+        }
+    }
+}
 
 static void cleanup()
 {
@@ -44,6 +95,7 @@ static void cleanup()
         g_source_remove(active_vt_watch_id);
         active_vt_watch_id = 0;
     }
+    deinit_pulse();
     g_clear_pointer(&screensaver_proxy, g_object_unref);
     g_clear_pointer(&loop, g_main_loop_unref);
     g_clear_pointer(&extra_x11_layout_options, g_free);
@@ -120,7 +172,14 @@ static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpoint
 	gchar new_tty[sizeof(owning_tty)] = { '\0' };
 	g_io_channel_seek_position(source, 0, G_SEEK_SET, NULL);
 
-	if (condition & G_IO_PRI) {
+#if 0
+	if ((condition & G_IO_ERR) || (condition & G_IO_HUP)) {
+		g_debug("kernel hung up active vt watch");
+		return G_SOURCE_REMOVE;
+	}
+#endif
+
+	if (G_LIKELY(condition & G_IO_PRI)) {
 		switch (g_io_channel_read_chars(source, new_tty, sizeof(new_tty), NULL, NULL)) {
 			case G_IO_STATUS_ERROR:
 			case G_IO_STATUS_EOF:
@@ -131,13 +190,6 @@ static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpoint
 				break;
 		}
 	}
-
-#if 0
-	if ((condition & G_IO_ERR) || (condition & G_IO_HUP)) {
-		g_debug("kernel hung up active vt watch");
-		return G_SOURCE_REMOVE;
-	}
-#endif
 
 	if (*new_tty == '\0') {
 		g_debug("unable to read active VT from kernel");
@@ -310,7 +362,9 @@ static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G
             write_sysrq(locked ? "0" : orig_sysrq);
         if (modify_x11_layout_options)
             mess_with_x11s_layout(locked);
-        if (!locked)
+        if (locked)
+            mute_sound();
+        else
             wtfkde();
     }
 }
@@ -341,6 +395,8 @@ int main()
     loop = g_main_loop_new(NULL, FALSE);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
+
+    init_pulse();
 
     if (seteuid(0) == -1) {
         perror("Failed to regain root privs");

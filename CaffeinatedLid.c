@@ -1,4 +1,4 @@
-// cc -Wall -O2 -s `pkg-config --cflags --libs gio-unix-2.0 libpulse-mainloop-glib` CaffeinatedLid.c -o InhibitLidClose
+// cc -Wall -O2 -s `pkg-config --cflags --libs gio-unix-2.0` CaffeinatedLid.c -o InhibitLidClose
 
 /*
 	This hack shuts down KDE's PowerDevil so that closing my laptop's lid without the charger plugged in doesn't put the laptop to sleep.
@@ -8,7 +8,7 @@
 		* shuts down PD via D-Bus
 		* holds a systemd handle-lid-switch inhibitor to ensure systemd doesn't obey HandleLidSwitch=suspend
 		* starts the cbatticon battery tray icon program - KDE's one disappears when PD is gone
-		* mutes the sound via PulseAudio and locks the computer when the lid is closed (since PD can't do that anymore)
+		* locks the computer when the lid is closed (since PD can't do that anymore)
 
 	When another instance of this program is started, or the AC adapter plugged in, this program automatically quits and starts PD again
 	cbatticon is configured to run this program when its tray icon is left-clicked
@@ -19,59 +19,12 @@
 #include <glib-unix.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
-#include <pulse/pulseaudio.h>
-#include <pulse/glib-mainloop.h>
 
 static GApplication *app = NULL;
 static GDBusProxy *upower_proxy = NULL;
 static GDBusProxy *logind_proxy = NULL;
 static gint logind_fd = 0;
 static GSubprocess *cbatticon_subprocess = NULL;
-
-static gboolean pulse_ready = FALSE;
-static pa_glib_mainloop *pa_loop = NULL;
-static pa_context *pa_ctx = NULL;
-
-static void pa_server_info_callback(pa_context *context, const pa_server_info *i, void *userdata G_GNUC_UNUSED)
-{
-	if (i->default_sink_name)
-	    pa_operation_unref(pa_context_set_sink_mute_by_name(context, i->default_sink_name, 1, NULL, NULL));
-}
-
-static void context_state_callback(pa_context *context, void *userdata G_GNUC_UNUSED)
-{
-	pulse_ready = pa_context_get_state(context) == PA_CONTEXT_READY;
-}
-
-static void deinit_pulse()
-{
-	if (pa_ctx) {
-		pa_context_disconnect(pa_ctx);
-		g_clear_pointer(&pa_ctx, pa_context_unref);
-	}
-
-	g_clear_pointer(&pa_loop, pa_glib_mainloop_free);
-}
-
-static void mute_sound()
-{
-	// Many thanks to https://kdekorte.blogspot.com/2010/11/getting-default-volume-from-pulseaudio.html
-	if (pulse_ready)
-		pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, NULL));
-}
-
-static void init_pulse()
-{
-	if (!pa_loop)
-		pa_loop = pa_glib_mainloop_new(NULL);
-
-	if (!pa_ctx) {
-    	if ((pa_ctx = pa_context_new(pa_glib_mainloop_get_api(pa_loop), g_application_get_application_id(app)))) {
-	    	pa_context_connect(pa_ctx, NULL, PA_CONTEXT_NOAUTOSPAWN, NULL);
-	    	pa_context_set_state_callback(pa_ctx, context_state_callback, NULL);
-    	}
-    }
-}
 
 static void cbatticon_start()
 {
@@ -218,10 +171,8 @@ static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant
         return;
     }
 
-    if (lid_closed) {
+    if (lid_closed)
         lock_originating_session();
-        mute_sound();
-    }
 }
 
 static gboolean upower_init()
@@ -259,7 +210,6 @@ static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED
     powerdevil_close();
     pk_engine_inhibit();
     cbatticon_start();
-    init_pulse();
 
     g_application_hold(application);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
@@ -270,7 +220,6 @@ static void cleanup()
 {
     cbatticon_close();
 
-    deinit_pulse();
     pk_engine_uninhibit();
     g_clear_pointer(&logind_proxy, g_object_unref);
     g_clear_pointer(&upower_proxy, g_object_unref);
