@@ -24,6 +24,8 @@ static GApplication *app = NULL;
 static GDBusProxy *upower_proxy = NULL;
 static GDBusProxy *logind_proxy = NULL;
 static gint logind_fd = 0;
+
+#ifdef KDE
 static GSubprocess *cbatticon_subprocess = NULL;
 
 static void cbatticon_start()
@@ -42,7 +44,7 @@ static void cbatticon_close()
         return;
 
     g_subprocess_send_signal(cbatticon_subprocess, SIGTERM);
-    g_clear_pointer(&cbatticon_subprocess, g_object_unref);
+    g_clear_object(&cbatticon_subprocess);
 }
 
 static gboolean powerdevil_running()
@@ -58,10 +60,11 @@ static gboolean powerdevil_running()
     return ret;
 }
 
-static void child_setup(gpointer user_data G_GNUC_UNUSED)
+static void child_setup(gpointer user_data)
 {
+    //setpgid(0, GPOINTER_TO_GINT(user_data));
     setsid();
-    setpgid(0, 0);
+    setpgid(getpid(), getpid());
 }
 
 static void powerdevil_start()
@@ -70,7 +73,7 @@ static void powerdevil_start()
         return;
 
     gchar *argv[] = { "/usr/lib/org_kde_powerdevil", NULL };
-    g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, child_setup, NULL, NULL, NULL);
+    g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, child_setup, GINT_TO_POINTER(getpgid(getppid())), NULL, NULL);
 }
 
 static void powerdevil_close()
@@ -96,6 +99,7 @@ static void lock_originating_session()
 
     g_variant_unref(g_dbus_proxy_call_sync(this_session, "Lock", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
 }
+#endif
 
 // Stolen from the PackageKit source
 static void pk_engine_inhibit()
@@ -148,7 +152,9 @@ static void pk_engine_uninhibit()
 
 static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     gboolean ac_connected = FALSE;
+#ifdef KDE
     gboolean lid_closed = FALSE;
+#endif
     GVariant *v;
     GVariantDict dict;
 
@@ -160,19 +166,23 @@ static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant
         g_variant_unref(v);
     }
 
+#ifdef KDE
     if (g_variant_dict_contains(&dict, "LidIsClosed")) {
         v = g_variant_dict_lookup_value(&dict, "LidIsClosed", G_VARIANT_TYPE_BOOLEAN);
         lid_closed = g_variant_get_boolean(v);
         g_variant_unref(v);
     }
+#endif
 
     if (ac_connected) {
         g_application_quit(app);
         return;
     }
 
+#ifdef KDE
     if (lid_closed)
         lock_originating_session();
+#endif
 }
 
 static gboolean upower_init()
@@ -207,9 +217,13 @@ static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED
         return;
     }
 
+#ifdef KDE
     powerdevil_close();
+#endif
     pk_engine_inhibit();
+#ifdef KDE
     cbatticon_start();
+#endif
 
     g_application_hold(application);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
@@ -218,14 +232,18 @@ static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED
 
 static void cleanup()
 {
+#ifdef KDE
     cbatticon_close();
+#endif
 
     pk_engine_uninhibit();
-    g_clear_pointer(&logind_proxy, g_object_unref);
-    g_clear_pointer(&upower_proxy, g_object_unref);
-    g_clear_pointer(&app, g_object_unref);
+    g_clear_object(&logind_proxy);
+    g_clear_object(&upower_proxy);
+    g_clear_object(&app);
 
+#ifdef KDE
     powerdevil_start();
+#endif
 }
 
 int main()

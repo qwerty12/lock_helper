@@ -34,8 +34,10 @@ static gboolean modify_sysrq;
 static gboolean modify_x11_layout_options;
 static gchar *extra_x11_layout_options = NULL;
 
+#ifdef WATCH_VT
 static gchar owning_tty[8];
 static guint active_vt_watch_id = 0;
+#endif
 
 static gboolean pulse_ready = FALSE;
 static pa_glib_mainloop *pa_loop = NULL;
@@ -91,12 +93,14 @@ static void cleanup()
     setuid(orig_user);
     seteuid(orig_user);
 
+#ifdef WATCH_VT
     if (active_vt_watch_id) {
         g_source_remove(active_vt_watch_id);
         active_vt_watch_id = 0;
     }
+#endif
     deinit_pulse();
-    g_clear_pointer(&screensaver_proxy, g_object_unref);
+    g_clear_object(&screensaver_proxy);
     g_clear_pointer(&loop, g_main_loop_unref);
     g_clear_pointer(&extra_x11_layout_options, g_free);
 }
@@ -144,6 +148,7 @@ static void write_sysrq(const char *val)
 
 static void lock_vt(gboolean lock)
 {
+#if 0
     // Thanks to sflock
     if (term == -1)
         if ((term = g_open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
@@ -153,24 +158,29 @@ static void lock_vt(gboolean lock)
 
     if (ioctl(term, lock ? VT_LOCKSWITCH : VT_UNLOCKSWITCH) == -1)
         perror("VT_(UN)LOCKSWITCH");
+#endif
 }
 
+#ifdef KDE
 static void child_setup(gpointer user_data G_GNUC_UNUSED)
 {
 	if (setuid(orig_user) != 0)
 		exit(EXIT_FAILURE);
 }
+#endif
 
 static void wtfkde()
 {
+#ifdef KDE
     gchar *argv[] = { "/usr/bin/kcminit", "kcm_touchpad", NULL };
     g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, child_setup, NULL, NULL, NULL);
+#endif
 }
 
+#ifdef WATCH_VT
 static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpointer data G_GNUC_UNUSED)
 {
 	gchar new_tty[sizeof(owning_tty)] = { '\0' };
-	g_io_channel_seek_position(source, 0, G_SEEK_SET, NULL);
 
 #if 0
 	if ((condition & G_IO_ERR) || (condition & G_IO_HUP)) {
@@ -180,6 +190,8 @@ static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpoint
 #endif
 
 	if (G_LIKELY(condition & G_IO_PRI)) {
+		g_io_channel_seek_position(source, 0, G_SEEK_SET, NULL);
+
 		switch (g_io_channel_read_chars(source, new_tty, sizeof(new_tty), NULL, NULL)) {
 			case G_IO_STATUS_ERROR:
 			case G_IO_STATUS_EOF:
@@ -189,16 +201,16 @@ static gboolean on_vt_changed(GIOChannel *source, GIOCondition condition, gpoint
 			case G_IO_STATUS_NORMAL:
 				break;
 		}
-	}
 
-	if (*new_tty == '\0') {
-		g_debug("unable to read active VT from kernel");
-		return G_SOURCE_CONTINUE;
-	}
+		if (*new_tty == '\0') {
+			g_debug("unable to read active VT from kernel");
+			return G_SOURCE_CONTINUE;
+		}
 
-	if (!g_strcmp0(g_strchomp(new_tty), owning_tty)) {
-		sleep(1);
-		wtfkde();
+		if (!g_strcmp0(g_strchomp(new_tty), owning_tty)) {
+			sleep(1);
+			wtfkde();
+		}
 	}
 
 	return G_SOURCE_CONTINUE;
@@ -221,6 +233,7 @@ static void prepare_watch_for_vt_changes()
 		g_io_channel_unref(io_channel);
 	}
 }
+#endif
 
 static gboolean must_we_mess_with_x11s_layout(gchar **extra_options)
 {
@@ -390,7 +403,9 @@ int main()
     }
     g_signal_connect(screensaver_proxy, "g-signal", G_CALLBACK(on_screensaver), NULL);
 
+#ifdef WATCH_VT
     prepare_watch_for_vt_changes();
+#endif
 
     loop = g_main_loop_new(NULL, FALSE);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
