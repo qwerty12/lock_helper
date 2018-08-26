@@ -25,82 +25,6 @@ static GDBusProxy *upower_proxy = NULL;
 static GDBusProxy *logind_proxy = NULL;
 static gint logind_fd = 0;
 
-#ifdef KDE
-static GSubprocess *cbatticon_subprocess = NULL;
-
-static void cbatticon_start()
-{
-    if (cbatticon_subprocess)
-        return;
-
-    gchar *me = g_file_read_link("/proc/self/exe", NULL);
-    cbatticon_subprocess = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL, "/usr/bin/cbatticon", "-n", me ? "-x" : NULL, me ? me : NULL, NULL);
-    g_free(me);
-}
-
-static void cbatticon_close()
-{
-    if (!cbatticon_subprocess)
-        return;
-
-    g_subprocess_send_signal(cbatticon_subprocess, SIGTERM);
-    g_clear_object(&cbatticon_subprocess);
-}
-
-static gboolean powerdevil_running()
-{
-    gboolean ret = FALSE;
-    g_autoptr(GDBusProxy) dbus_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.DBus", "/", "org.freedesktop.DBus", NULL, NULL);
-    g_autoptr(GVariant) res = NULL;
-
-    if (dbus_proxy)
-        if ((res = g_dbus_proxy_call_sync(dbus_proxy, "NameHasOwner", g_variant_new("(s)", "local.org_kde_powerdevil"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL)))
-            g_variant_get(res, "(b)", &ret);
-
-    return ret;
-}
-
-static void child_setup(gpointer user_data)
-{
-    //setpgid(0, GPOINTER_TO_GINT(user_data));
-    setsid();
-    setpgid(getpid(), getpid());
-}
-
-static void powerdevil_start()
-{
-    if (powerdevil_running())
-        return;
-
-    gchar *argv[] = { "/usr/lib/org_kde_powerdevil", NULL };
-    g_spawn_async(g_get_home_dir(), argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, child_setup, GINT_TO_POINTER(getpgid(getppid())), NULL, NULL);
-}
-
-static void powerdevil_close()
-{
-    if (!powerdevil_running())
-        return;
-
-    GDBusProxy *powerdevil_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS | G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, NULL, "local.org_kde_powerdevil", "/MainApplication", "org.qtproject.Qt.QCoreApplication", NULL, NULL);
-    if (!powerdevil_proxy) {
-        g_printerr("Failed to obtain PowerDevil proxy\n");
-        return;
-    }
-
-    g_variant_unref(g_dbus_proxy_call_sync(powerdevil_proxy, "quit", NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL));
-    g_object_unref(powerdevil_proxy);
-}
-
-static void lock_originating_session()
-{
-    static GDBusProxy *this_session = NULL;
-    if (!this_session)
-        this_session = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.login1", "/org/freedesktop/login1/session/self", "org.freedesktop.login1.Session", NULL, NULL);
-
-    g_variant_unref(g_dbus_proxy_call_sync(this_session, "Lock", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
-}
-#endif
-
 // Stolen from the PackageKit source
 static void pk_engine_inhibit()
 {
@@ -152,9 +76,6 @@ static void pk_engine_uninhibit()
 
 static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     gboolean ac_connected = FALSE;
-#ifdef KDE
-    gboolean lid_closed = FALSE;
-#endif
     GVariant *v;
     GVariantDict dict;
 
@@ -166,23 +87,10 @@ static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant
         g_variant_unref(v);
     }
 
-#ifdef KDE
-    if (g_variant_dict_contains(&dict, "LidIsClosed")) {
-        v = g_variant_dict_lookup_value(&dict, "LidIsClosed", G_VARIANT_TYPE_BOOLEAN);
-        lid_closed = g_variant_get_boolean(v);
-        g_variant_unref(v);
-    }
-#endif
-
     if (ac_connected) {
         g_application_quit(app);
         return;
     }
-
-#ifdef KDE
-    if (lid_closed)
-        lock_originating_session();
-#endif
 }
 
 static gboolean upower_init()
@@ -217,13 +125,7 @@ static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED
         return;
     }
 
-#ifdef KDE
-    powerdevil_close();
-#endif
     pk_engine_inhibit();
-#ifdef KDE
-    cbatticon_start();
-#endif
 
     g_application_hold(application);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
@@ -232,18 +134,10 @@ static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED
 
 static void cleanup()
 {
-#ifdef KDE
-    cbatticon_close();
-#endif
-
     pk_engine_uninhibit();
     g_clear_object(&logind_proxy);
     g_clear_object(&upower_proxy);
     g_clear_object(&app);
-
-#ifdef KDE
-    powerdevil_start();
-#endif
 }
 
 int main()
