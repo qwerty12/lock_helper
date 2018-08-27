@@ -1,4 +1,4 @@
-// cc -Wall -O2 -s `pkg-config --cflags --libs gio-unix-2.0` CaffeinatedLid.c -o InhibitLidClose
+// cc -Wall -O2 -s `pkg-config --cflags --libs gio-unix-2.0 gtk+-3.0 appindicator3-0.1` CaffeinatedLid.c -o InhibitLidClose
 
 /*
 	This hack shuts down KDE's PowerDevil so that closing my laptop's lid without the charger plugged in doesn't put the laptop to sleep.
@@ -20,10 +20,15 @@
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 
+#include <gtk/gtk.h>
+#include <libappindicator/app-indicator.h>
+
 static GApplication *app = NULL;
 static GDBusProxy *upower_proxy = NULL;
 static GDBusProxy *logind_proxy = NULL;
 static gint logind_fd = 0;
+static AppIndicator *indicator = NULL;
+static GtkWidget *start_menu_item = NULL;
 
 // Stolen from the PackageKit source
 static void pk_engine_inhibit()
@@ -63,6 +68,11 @@ static void pk_engine_inhibit()
 	}
 	logind_fd = g_unix_fd_list_get(out_fd_list, 0, NULL);
 	g_debug("opened logind fd %i", logind_fd);
+
+    if (start_menu_item) {
+        gtk_menu_item_set_label(GTK_MENU_ITEM(start_menu_item), "Stop");
+        app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ATTENTION);
+    }
 }
 
 static void pk_engine_uninhibit()
@@ -72,6 +82,19 @@ static void pk_engine_uninhibit()
 	g_debug("closed logind fd %i", logind_fd);
 	g_close(logind_fd, NULL);
 	logind_fd = 0;
+
+    if (start_menu_item) {
+        gtk_menu_item_set_label(GTK_MENU_ITEM(start_menu_item), "Start");
+        app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
+    }
+}
+
+static void pk_engine_toggleinhibition(GtkMenuItem *menuitem G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+    if (logind_fd == 0)
+        pk_engine_inhibit();
+    else
+        pk_engine_uninhibit();
 }
 
 static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
@@ -88,17 +111,42 @@ static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant
     }
 
     if (ac_connected) {
-        g_application_quit(app);
+        pk_engine_uninhibit();
         return;
     }
 }
 
-static gboolean upower_init()
+static void upower_init()
 {
     upower_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower", NULL, NULL);
-    g_return_val_if_fail(upower_proxy != NULL, FALSE);
     g_signal_connect(upower_proxy, "g-properties-changed", G_CALLBACK(lid_closed_or_ac_connected), NULL);
-    return TRUE;
+}
+
+static void indicator_init()
+{
+    GtkWidget *menu = gtk_menu_new();
+    GtkWidget *menu_item;
+
+    start_menu_item = menu_item = gtk_menu_item_new_with_label("Start");
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), menu_item);
+    g_object_add_weak_pointer(G_OBJECT(start_menu_item), (gpointer*)&start_menu_item);
+    g_signal_connect(menu_item, "activate", G_CALLBACK(pk_engine_toggleinhibition), NULL);
+
+    menu_item = gtk_separator_menu_item_new ();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), menu_item);
+
+    menu_item = gtk_menu_item_new_with_label("Exit");
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), menu_item);
+    g_signal_connect_swapped(menu_item, "activate", G_CALLBACK(g_application_quit), app);
+
+    indicator = app_indicator_new("indicator-caffeinatedlid", "my-caffeine-off-symbolic", APP_INDICATOR_CATEGORY_SYSTEM_SERVICES);
+    app_indicator_set_attention_icon(indicator, "caffeine-cup-full");
+    app_indicator_set_title(indicator, "CaffeinatedLid");
+    app_indicator_set_secondary_activate_target(indicator, start_menu_item);
+    app_indicator_set_menu(indicator, GTK_MENU(menu));
+    app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
+
+    gtk_widget_show_all(menu);
 }
 
 static gboolean on_sigint(gpointer data_ptr G_GNUC_UNUSED)
@@ -107,36 +155,41 @@ static gboolean on_sigint(gpointer data_ptr G_GNUC_UNUSED)
     return G_SOURCE_REMOVE;
 }
 
-static void activate(GApplication *application, gpointer user_data G_GNUC_UNUSED)
+static void activate(GApplication *app, gpointer user_data G_GNUC_UNUSED)
 {
     static gboolean already_activated = FALSE;
     if (!already_activated)
         already_activated = TRUE;
     else {
-        g_application_quit(application);
+        pk_engine_toggleinhibition(NULL, NULL);
         return;
     }
-
-    if (!upower_init())
-        return;
 
     if (!(logind_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", NULL, NULL))) {
         g_printerr("Failed to obtain logind proxy\n");
         return;
     }
 
-    pk_engine_inhibit();
+    indicator_init();
+    upower_init();
 
-    g_application_hold(application);
-    g_unix_signal_add(SIGINT, on_sigint, NULL);
+    g_application_hold(app);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
+    g_unix_signal_add(SIGINT, on_sigint, NULL);
 }
 
 static void cleanup()
 {
+    if (indicator) {
+        app_indicator_set_status(indicator, APP_INDICATOR_STATUS_PASSIVE);
+        g_clear_object(&indicator);
+    }
     pk_engine_uninhibit();
     g_clear_object(&logind_proxy);
-    g_clear_object(&upower_proxy);
+    if (upower_proxy) {
+        g_signal_handlers_disconnect_by_func(upower_proxy, lid_closed_or_ac_connected, NULL);
+        g_clear_object(&upower_proxy);
+    }
     g_clear_object(&app);
 }
 
@@ -144,7 +197,7 @@ int main()
 {
     gint status;
 
-    app = g_application_new("pk.qwerty12.CaffeinatedLid", G_APPLICATION_FLAGS_NONE);
+    app = G_APPLICATION (gtk_application_new("pk.qwerty12.CaffeinatedLid", G_APPLICATION_FLAGS_NONE));
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
 
     status = g_application_run(app, 0, NULL);
