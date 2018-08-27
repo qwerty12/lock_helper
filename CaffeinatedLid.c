@@ -67,19 +67,19 @@ static void pk_engine_inhibit()
 		return;
 	}
 	logind_fd = g_unix_fd_list_get(out_fd_list, 0, NULL);
-	g_debug("opened logind fd %i", logind_fd);
 
     if (start_menu_item) {
         gtk_menu_item_set_label(GTK_MENU_ITEM(start_menu_item), "Stop");
         app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ATTENTION);
     }
+
+    g_debug("opened logind fd %i", logind_fd);
 }
 
 static void pk_engine_uninhibit()
 {
     if (logind_fd == 0)
 		return;
-	g_debug("closed logind fd %i", logind_fd);
 	g_close(logind_fd, NULL);
 	logind_fd = 0;
 
@@ -87,6 +87,8 @@ static void pk_engine_uninhibit()
         gtk_menu_item_set_label(GTK_MENU_ITEM(start_menu_item), "Start");
         app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
     }
+
+    g_debug("closed logind fd %i", logind_fd);
 }
 
 static void pk_engine_toggleinhibition(GtkMenuItem *menuitem G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
@@ -149,6 +151,21 @@ static void indicator_init()
     gtk_widget_show_all(menu);
 }
 
+static void cleanup()
+{
+    if (indicator) {
+        app_indicator_set_status(indicator, APP_INDICATOR_STATUS_PASSIVE);
+        g_clear_object(&indicator);
+    }
+    pk_engine_uninhibit();
+    g_clear_object(&logind_proxy);
+    if (upower_proxy) {
+        g_signal_handlers_disconnect_by_func(upower_proxy, lid_closed_or_ac_connected, NULL);
+        g_clear_object(&upower_proxy);
+    }
+    g_clear_object(&app);
+}
+
 static gboolean on_sigint(gpointer data_ptr G_GNUC_UNUSED)
 {
     g_application_quit(app);
@@ -170,27 +187,12 @@ static void activate(GApplication *app, gpointer user_data G_GNUC_UNUSED)
         return;
     }
 
-    indicator_init();
     upower_init();
+    indicator_init();
 
     g_application_hold(app);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
     g_unix_signal_add(SIGINT, on_sigint, NULL);
-}
-
-static void cleanup()
-{
-    if (indicator) {
-        app_indicator_set_status(indicator, APP_INDICATOR_STATUS_PASSIVE);
-        g_clear_object(&indicator);
-    }
-    pk_engine_uninhibit();
-    g_clear_object(&logind_proxy);
-    if (upower_proxy) {
-        g_signal_handlers_disconnect_by_func(upower_proxy, lid_closed_or_ac_connected, NULL);
-        g_clear_object(&upower_proxy);
-    }
-    g_clear_object(&app);
 }
 
 int main()

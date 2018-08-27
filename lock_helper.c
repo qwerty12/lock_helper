@@ -38,6 +38,10 @@ static gboolean pulse_ready = FALSE;
 static pa_glib_mainloop *pa_loop = NULL;
 static pa_context *pa_ctx = NULL;
 
+// Fucking GNOME...
+static GDBusProxy *gnome_session_main_proxy = NULL;
+static GDBusProxy *gnome_session_client_proxy = NULL;
+
 static void deinit_pulse()
 {
     if (pa_ctx) {
@@ -59,11 +63,15 @@ static void context_state_callback(pa_context *context, void *userdata G_GNUC_UN
     pulse_ready = pa_context_get_state(context) == PA_CONTEXT_READY;
 }
 
-static void mute_sound()
+static void mute_sound(gboolean attempt_now)
 {
     // Many thanks to https://kdekorte.blogspot.com/2010/11/getting-default-volume-from-pulseaudio.html
-    if (pulse_ready)
-        pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, NULL));
+    if (pulse_ready) {
+        if (attempt_now)
+            pa_operation_unref(pa_context_set_sink_mute_by_index(pa_ctx, 0, 1, NULL, NULL));
+        else
+            pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, NULL));
+    }
 }
 
 static void init_pulse()
@@ -79,19 +87,78 @@ static void init_pulse()
     }
 }
 
-static void cleanup()
-{
-    if (term != -1) {
-        g_close(term, NULL);
-        term = -1;
-    }
-    setuid(orig_user);
-    seteuid(orig_user);
+static void gnome_session_unregister();
 
-    deinit_pulse();
-    g_clear_object(&screensaver_proxy);
-    g_clear_pointer(&loop, g_main_loop_unref);
-    g_clear_pointer(&extra_x11_layout_options, g_free);
+static void gnome_session_all_is_ok()
+{
+    g_variant_unref(g_dbus_proxy_call_sync(gnome_session_client_proxy, "EndSessionResponse", g_variant_new ("(bs)", TRUE, ""), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
+}
+
+static void gnome_session_on_signal(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G_GNUC_UNUSED, gchar *signal_name, GVariant *parameters G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+    if (!g_strcmp0(signal_name, "Stop")) {
+        gnome_session_unregister();
+        g_main_loop_quit(loop);
+    } else if (!g_strcmp0(signal_name, "QueryEndSession")) {
+        gnome_session_all_is_ok();
+    } else if (!g_strcmp0(signal_name, "EndSession")) {
+        mute_sound(TRUE);
+        do
+            g_main_context_iteration(NULL, TRUE);
+        while (g_main_context_pending(NULL));
+        gnome_session_all_is_ok();
+        gnome_session_unregister();
+        g_main_loop_quit(loop);
+    }
+}
+
+static void gnome_session_unregister()
+{
+    gchar *client_id = NULL;
+
+    if (gnome_session_client_proxy) {
+        client_id = g_strdup(g_dbus_proxy_get_object_path(gnome_session_client_proxy));
+        g_signal_handlers_disconnect_by_func(gnome_session_client_proxy, gnome_session_on_signal, NULL);
+        g_clear_object(&gnome_session_client_proxy);
+    }
+
+    if (gnome_session_main_proxy) {
+        if (client_id)
+            g_variant_unref(g_dbus_proxy_call_sync(gnome_session_main_proxy, "UnregisterClient", g_variant_new ("(o)", client_id), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
+        g_clear_object(&gnome_session_main_proxy);
+    }
+
+    g_free(client_id);
+}
+
+void gnome_session_register()
+{
+    const gchar *id = g_getenv("DESKTOP_AUTOSTART_ID");
+    if (!id)
+        return;
+
+    gnome_session_main_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS | G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, NULL, "org.gnome.SessionManager", "/org/gnome/SessionManager", "org.gnome.SessionManager", NULL, NULL);
+    if (gnome_session_main_proxy) {
+        GVariant *res = g_dbus_proxy_call_sync(gnome_session_main_proxy, "RegisterClient", g_variant_new ("(ss)", "pk.qwerty12.lock_helper", id), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL);
+        if (res) {
+            gchar *client_id = NULL;
+            g_variant_get(res, "(o)", &client_id);
+            if (client_id) {
+                gnome_session_client_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES, NULL, "org.gnome.SessionManager", client_id, "org.gnome.SessionManager.ClientPrivate", NULL, NULL);
+
+                if (gnome_session_client_proxy)
+                    g_signal_connect(gnome_session_client_proxy, "g-signal", G_CALLBACK(gnome_session_on_signal), NULL);
+
+                g_free(client_id);
+            }
+            g_variant_unref(res);
+        }
+
+        if (!gnome_session_client_proxy)
+            g_clear_object(&gnome_session_main_proxy);
+    }
+
+    g_unsetenv("DESKTOP_AUTOSTART_ID");
 }
 
 static gboolean on_sigint(gpointer data_ptr G_GNUC_UNUSED)
@@ -275,8 +342,27 @@ static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G
         if (modify_x11_layout_options)
             mess_with_x11s_layout(locked);
         if (locked)
-            mute_sound();
+            mute_sound(FALSE);
     }
+}
+
+static void cleanup()
+{
+    if (term != -1) {
+        g_close(term, NULL);
+        term = -1;
+    }
+    setuid(orig_user);
+    seteuid(orig_user);
+
+    gnome_session_unregister();
+    deinit_pulse();
+    if (screensaver_proxy) {
+        g_signal_handlers_disconnect_by_func(screensaver_proxy, on_screensaver, NULL);
+        g_clear_object(&screensaver_proxy);
+    }
+    g_clear_pointer(&loop, g_main_loop_unref);
+    g_clear_pointer(&extra_x11_layout_options, g_free);
 }
 
 int main()
@@ -305,6 +391,7 @@ int main()
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
 
     init_pulse();
+    gnome_session_register();
 
     if (seteuid(0) == -1) {
         perror("Failed to regain root privs");
