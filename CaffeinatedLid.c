@@ -129,7 +129,7 @@ static void indicator_init()
     GtkWidget *menu = gtk_menu_new();
     GtkWidget *menu_item;
 
-    start_menu_item = menu_item = gtk_menu_item_new_with_label("Start");
+    menu_item = start_menu_item = gtk_menu_item_new_with_label("Start");
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), menu_item);
     g_object_add_weak_pointer(G_OBJECT(start_menu_item), (gpointer*)&start_menu_item);
     g_signal_connect(menu_item, "activate", G_CALLBACK(pk_engine_toggleinhibition), NULL);

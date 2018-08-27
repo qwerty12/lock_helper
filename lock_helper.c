@@ -89,6 +89,12 @@ static void init_pulse()
 
 static void gnome_session_unregister();
 
+static void child_setup(gpointer user_data G_GNUC_UNUSED)
+{
+    if (setuid(orig_user) != 0)
+        exit(EXIT_FAILURE);
+}
+
 static void gnome_session_all_is_ok()
 {
     g_variant_unref(g_dbus_proxy_call_sync(gnome_session_client_proxy, "EndSessionResponse", g_variant_new ("(bs)", TRUE, ""), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
@@ -102,10 +108,13 @@ static void gnome_session_on_signal(GDBusProxy *proxy G_GNUC_UNUSED, gchar *send
     } else if (!g_strcmp0(signal_name, "QueryEndSession")) {
         gnome_session_all_is_ok();
     } else if (!g_strcmp0(signal_name, "EndSession")) {
+        gchar *argv[] = { "/home/faheem/bin/xkillall", NULL };
         mute_sound(TRUE);
+        g_spawn_sync(NULL, argv, NULL, G_SPAWN_DEFAULT, child_setup, NULL, NULL, NULL, NULL, NULL);
         do
             g_main_context_iteration(NULL, TRUE);
         while (g_main_context_pending(NULL));
+
         gnome_session_all_is_ok();
         gnome_session_unregister();
         g_main_loop_quit(loop);
