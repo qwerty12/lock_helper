@@ -45,6 +45,8 @@ static GDBusProxy *gnome_session_client_proxy = NULL;
 
 static void deinit_pulse()
 {
+    pulse_ready = FALSE;
+
     if (pa_ctx) {
         pa_context_disconnect(pa_ctx);
         g_clear_pointer(&pa_ctx, pa_context_unref);
@@ -69,7 +71,8 @@ static void pa_server_info_callback(pa_context *context, const pa_server_info *i
 
 static void context_state_callback(pa_context *context, void *userdata G_GNUC_UNUSED)
 {
-    pulse_ready = pa_context_get_state(context) == PA_CONTEXT_READY;
+    if ((pulse_ready = pa_context_get_state(context) == PA_CONTEXT_READY))
+        pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, GINT_TO_POINTER(FALSE)));
 }
 
 static void mute_sound(gboolean attempt_now)
