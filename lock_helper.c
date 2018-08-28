@@ -37,6 +37,7 @@ static gchar *extra_x11_layout_options = NULL;
 static gboolean pulse_ready = FALSE;
 static pa_glib_mainloop *pa_loop = NULL;
 static pa_context *pa_ctx = NULL;
+static gchar *default_sink = NULL;
 
 // Fucking GNOME...
 static GDBusProxy *gnome_session_main_proxy = NULL;
@@ -50,12 +51,20 @@ static void deinit_pulse()
     }
 
     g_clear_pointer(&pa_loop, pa_glib_mainloop_free);
+    g_clear_pointer(&default_sink, g_free);
 }
 
-static void pa_server_info_callback(pa_context *context, const pa_server_info *i, void *userdata G_GNUC_UNUSED)
+static void pa_server_info_callback(pa_context *context, const pa_server_info *i, void *userdata)
 {
-    if (i->default_sink_name)
-        pa_operation_unref(pa_context_set_sink_mute_by_name(context, i->default_sink_name, 1, NULL, NULL));
+    if (i->default_sink_name) {
+        if (GPOINTER_TO_INT(userdata))
+            pa_operation_unref(pa_context_set_sink_mute_by_name(context, i->default_sink_name, 1, NULL, NULL));
+
+        if (!default_sink || g_strcmp0(default_sink, i->default_sink_name)) {
+            g_free(default_sink);
+            default_sink = g_strdup(i->default_sink_name);
+        }
+    }
 }
 
 static void context_state_callback(pa_context *context, void *userdata G_GNUC_UNUSED)
@@ -67,10 +76,10 @@ static void mute_sound(gboolean attempt_now)
 {
     // Many thanks to https://kdekorte.blogspot.com/2010/11/getting-default-volume-from-pulseaudio.html
     if (pulse_ready) {
-        if (attempt_now)
-            pa_operation_unref(pa_context_set_sink_mute_by_index(pa_ctx, 0, 1, NULL, NULL));
+        if (attempt_now && default_sink)
+            pa_operation_unref(pa_context_set_sink_mute_by_name(pa_ctx, default_sink, 1, NULL, NULL));
         else
-            pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, NULL));
+            pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, GINT_TO_POINTER(TRUE)));
     }
 }
 
@@ -106,6 +115,7 @@ static void gnome_session_on_signal(GDBusProxy *proxy G_GNUC_UNUSED, gchar *send
         gnome_session_unregister();
         g_main_loop_quit(loop);
     } else if (!g_strcmp0(signal_name, "QueryEndSession")) {
+        pa_operation_unref(pa_context_get_server_info(pa_ctx, pa_server_info_callback, GINT_TO_POINTER(FALSE)));
         gnome_session_all_is_ok();
     } else if (!g_strcmp0(signal_name, "EndSession")) {
         gchar *argv[] = { "/home/faheem/bin/xkillall", NULL };
