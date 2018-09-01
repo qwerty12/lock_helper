@@ -102,11 +102,7 @@ static void init_pulse()
 
 static void lock_originating_session()
 {
-    static GDBusProxy *this_session = NULL;
-    if (!this_session)
-        this_session = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.login1", "/org/freedesktop/login1/session/self", "org.freedesktop.login1.Session", NULL, NULL);
-
-    g_variant_unref(g_dbus_proxy_call_sync(this_session, "Lock", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
+    g_variant_unref(g_dbus_proxy_call_sync(screensaver_proxy, "Lock", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
 }
 
 static void on_lid_closed(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
@@ -401,18 +397,32 @@ static void mess_with_x11s_layout(gboolean remove)
 
 static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G_GNUC_UNUSED, gchar *signal_name, GVariant *parameters, gpointer user_data G_GNUC_UNUSED)
 {
-    if (!g_strcmp0(signal_name, "ActiveChanged")) {
+    if (!g_strcmp0(signal_name, "Locked")) {
         gboolean locked;
         g_variant_get(parameters, "(b)", &locked);
 
-        lock_vt(locked);
-        if (modify_sysrq)
-            write_sysrq(locked ? "0" : orig_sysrq);
-        if (modify_x11_layout_options)
-            mess_with_x11s_layout(locked);
-        if (locked)
-            mute_sound(FALSE);
+        if (locked) {
+	        lock_vt(TRUE);
+	        if (modify_sysrq)
+	            write_sysrq("0");
+	        if (modify_x11_layout_options)
+	            mess_with_x11s_layout(locked);
+	        if (locked)
+	            mute_sound(FALSE);
+    	}
+    } else if (!g_strcmp0(signal_name, "ActiveChanged")) {
+        gboolean locked;
+        g_variant_get(parameters, "(b)", &locked);
+
+        if (!locked) {
+	        lock_vt(FALSE);
+	        if (modify_sysrq)
+	            write_sysrq(orig_sysrq);
+	        if (modify_x11_layout_options)
+	            mess_with_x11s_layout(FALSE);
+    	}
     }
+
 }
 
 static void cleanup()
@@ -454,7 +464,7 @@ int main()
 
     modify_x11_layout_options = must_we_mess_with_x11s_layout(&extra_x11_layout_options);
 
-    if (!(screensaver_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES, NULL, "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver", NULL, NULL))) {
+    if (!(screensaver_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES, NULL, "org.gnome.ScreenSaver", "/org/gnome/ScreenSaver", "org.gnome.ScreenSaver", NULL, NULL))) {
         g_printerr("Failed to connect to Screensaver interface on user's session\n");
         return EXIT_FAILURE;
     }
