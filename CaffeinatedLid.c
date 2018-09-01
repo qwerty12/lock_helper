@@ -99,7 +99,7 @@ static void pk_engine_toggleinhibition(GtkMenuItem *menuitem G_GNUC_UNUSED, gpoi
         pk_engine_uninhibit();
 }
 
-static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
+static void on_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
     gboolean ac_connected = FALSE;
     GVariant *v;
     GVariantDict dict;
@@ -121,7 +121,7 @@ static void lid_closed_or_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant
 static void upower_init()
 {
     upower_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower", NULL, NULL);
-    g_signal_connect(upower_proxy, "g-properties-changed", G_CALLBACK(lid_closed_or_ac_connected), NULL);
+    g_signal_connect(upower_proxy, "g-properties-changed", G_CALLBACK(on_ac_connected), NULL);
 }
 
 static void indicator_init()
@@ -160,7 +160,7 @@ static void cleanup()
     pk_engine_uninhibit();
     g_clear_object(&logind_proxy);
     if (upower_proxy) {
-        g_signal_handlers_disconnect_by_func(upower_proxy, lid_closed_or_ac_connected, NULL);
+        g_signal_handlers_disconnect_by_func(upower_proxy, on_ac_connected, NULL);
         g_clear_object(&upower_proxy);
     }
     g_clear_object(&app);

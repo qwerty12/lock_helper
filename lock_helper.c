@@ -26,6 +26,7 @@
 static uid_t orig_user;
 static GMainLoop *loop = NULL;
 static GDBusProxy *screensaver_proxy = NULL;
+static GDBusProxy *upower_proxy = NULL;
 static int term = -1;
 
 static char orig_sysrq[4];
@@ -97,6 +98,38 @@ static void init_pulse()
             pa_context_set_state_callback(pa_ctx, context_state_callback, NULL);
         }
     }
+}
+
+static void lock_originating_session()
+{
+    static GDBusProxy *this_session = NULL;
+    if (!this_session)
+        this_session = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.login1", "/org/freedesktop/login1/session/self", "org.freedesktop.login1.Session", NULL, NULL);
+
+    g_variant_unref(g_dbus_proxy_call_sync(this_session, "Lock", NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL));
+}
+
+static void on_lid_closed(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
+    gboolean lid_closed = FALSE;
+    GVariant *v;
+    GVariantDict dict;
+
+    g_variant_dict_init(&dict, changed_properties);
+
+    if (g_variant_dict_contains(&dict, "LidIsClosed")) {
+        v = g_variant_dict_lookup_value(&dict, "LidIsClosed", G_VARIANT_TYPE_BOOLEAN);
+        lid_closed = g_variant_get_boolean(v);
+        g_variant_unref(v);
+    }
+
+    if (lid_closed)
+        lock_originating_session();
+}
+
+static void upower_init()
+{
+    upower_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.freedesktop.UPower", "/org/freedesktop/UPower", "org.freedesktop.UPower", NULL, NULL);
+    g_signal_connect(upower_proxy, "g-properties-changed", G_CALLBACK(on_lid_closed), NULL);
 }
 
 static void gnome_session_unregister();
@@ -222,6 +255,19 @@ static void write_sysrq(const char *val)
         perror("Failed to write() " SYSRQ_PATH);
 
     g_close(fd, NULL);
+}
+
+static void lock_vt(gboolean lock)
+{
+    // Thanks to sflock
+    if (term == -1)
+        if ((term = g_open("/dev/console", O_RDONLY | O_NOCTTY | O_CLOEXEC)) == -1) {
+            perror("error opening console");
+            return;
+        }
+
+    if (ioctl(term, lock ? VT_LOCKSWITCH : VT_UNLOCKSWITCH) == -1)
+        perror("VT_(UN)LOCKSWITCH");
 }
 
 static gboolean must_we_mess_with_x11s_layout(gchar **extra_options)
@@ -359,6 +405,7 @@ static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G
         gboolean locked;
         g_variant_get(parameters, "(b)", &locked);
 
+        lock_vt(locked);
         if (modify_sysrq)
             write_sysrq(locked ? "0" : orig_sysrq);
         if (modify_x11_layout_options)
@@ -371,6 +418,7 @@ static void on_screensaver(GDBusProxy *proxy G_GNUC_UNUSED, gchar *sender_name G
 static void cleanup()
 {
     if (term != -1) {
+        lock_vt(FALSE);
         g_close(term, NULL);
         term = -1;
     }
@@ -379,6 +427,10 @@ static void cleanup()
 
     gnome_session_unregister();
     deinit_pulse();
+    if (upower_proxy) {
+        g_signal_handlers_disconnect_by_func(upower_proxy, on_lid_closed, NULL);
+        g_clear_object(&upower_proxy);
+    }
     if (screensaver_proxy) {
         g_signal_handlers_disconnect_by_func(screensaver_proxy, on_screensaver, NULL);
         g_clear_object(&screensaver_proxy);
@@ -414,6 +466,7 @@ int main()
 
     init_pulse();
     gnome_session_register();
+    upower_init();
 
     if (seteuid(0) == -1) {
         perror("Failed to regain root privs");
