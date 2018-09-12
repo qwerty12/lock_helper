@@ -1,17 +1,9 @@
 // cc -Wall -O2 -s `pkg-config --cflags --libs gio-unix-2.0 gtk+-3.0 appindicator3-0.1` CaffeinatedLid.c -o InhibitLidClose
 
 /*
-	This hack shuts down KDE's PowerDevil so that closing my laptop's lid without the charger plugged in doesn't put the laptop to sleep.
-	Sadly, PD ignores any inhibitors (its own, as per Caffeine; and systemd-logind's lid ones unless held as root). Changing PD's settings is a route I wanted to avoid
+	This holds a systemd handle-lid-switch inhibitor to ensure systemd doesn't obey HandleLidSwitch=suspend
 
-	This:
-		* shuts down PD via D-Bus
-		* holds a systemd handle-lid-switch inhibitor to ensure systemd doesn't obey HandleLidSwitch=suspend
-		* starts the cbatticon battery tray icon program - KDE's one disappears when PD is gone
-		* locks the computer when the lid is closed (since PD can't do that anymore)
-
-	When another instance of this program is started, or the AC adapter plugged in, this program automatically quits and starts PD again
-	cbatticon is configured to run this program when its tray icon is left-clicked
+	When another instance of this program is started, or the AC adapter is plugged in, this program automatically disables itself
 */
 
 #include <glib.h>
