@@ -1,0 +1,131 @@
+Index: budgie-screensaver/src/gs-listener-dbus.c
+===================================================================
+--- budgie-screensaver.orig/src/gs-listener-dbus.c
++++ budgie-screensaver/src/gs-listener-dbus.c
+@@ -187,6 +187,17 @@ gs_listener_send_signal_active_changed (
+         send_dbus_boolean_signal (listener, "ActiveChanged", listener->priv->active);
+ }
+
++void
++gs_listener_send_signal_locked (GSListener *listener, gboolean locked)
++{
++        g_return_if_fail (listener != NULL);
++
++        gs_debug ("Sending the Locked(%s) signal on the session bus",
++                  locked ? "TRUE" : "FALSE");
++
++        send_dbus_boolean_signal (listener, "Locked", locked);
++}
++
+ static gboolean
+ listener_check_activation (GSListener *listener)
+ {
+@@ -636,6 +647,9 @@ do_introspect (DBusConnection *connectio
+                                "    <signal name=\"ActiveChanged\">\n"
+                                "      <arg name=\"new_value\" type=\"b\"/>\n"
+                                "    </signal>\n"
++                               "    <signal name=\"Locked\">\n"
++                               "      <arg name=\"new_value\" type=\"b\"/>\n"
++                               "    </signal>\n"
+                                "  </interface>\n");
+
+         reply = dbus_message_new_method_return (message);
+Index: budgie-screensaver/src/gs-listener-dbus.h
+===================================================================
+--- budgie-screensaver.orig/src/gs-listener-dbus.h
++++ budgie-screensaver/src/gs-listener-dbus.h
+@@ -83,6 +83,8 @@ void        gs_listener_set_activation_e
+                                                  gboolean    enabled);
+ gboolean    gs_listener_get_activation_enabled  (GSListener *listener);
+
++void gs_listener_send_signal_locked (GSListener *listener, gboolean locked);
++
+ G_END_DECLS
+
+ #endif /* __GS_LISTENER_H */
+Index: budgie-screensaver/src/gs-monitor.c
+===================================================================
+--- budgie-screensaver.orig/src/gs-monitor.c
++++ budgie-screensaver/src/gs-monitor.c
+@@ -87,6 +87,14 @@ manager_deactivated_cb (GSManager *manag
+         gs_listener_set_active (monitor->priv->listener, FALSE);
+ }
+
++static void
++manager_locked_cb (GSManager *manager,
++                   gboolean locked,
++                   GSMonitor *monitor)
++{
++        gs_listener_send_signal_locked (monitor->priv->listener, locked);
++}
++
+ static gboolean
+ watcher_idle_cb (GSWatcher *watcher,
+                  gboolean   is_idle,
+@@ -415,6 +415,7 @@ disconnect_manager_signals (GSMonitor *m
+ {
+         g_signal_handlers_disconnect_by_func (monitor->priv->manager, manager_activated_cb, monitor);
+         g_signal_handlers_disconnect_by_func (monitor->priv->manager, manager_deactivated_cb, monitor);
++        g_signal_handlers_disconnect_by_func (monitor->priv->manager, manager_locked_cb, monitor);
+ }
+
+ static void
+@@ -416,6 +424,8 @@ connect_manager_signals (GSMonitor *moni
+                           G_CALLBACK (manager_activated_cb), monitor);
+         g_signal_connect (monitor->priv->manager, "deactivated",
+                           G_CALLBACK (manager_deactivated_cb), monitor);
++        g_signal_connect (monitor->priv->manager, "locked",
++                          G_CALLBACK (manager_locked_cb), monitor);
+ }
+
+ static void
+Index: budgie-screensaver/src/gs-manager.c
+===================================================================
+--- budgie-screensaver.orig/src/gs-manager.c
++++ budgie-screensaver/src/gs-manager.c
+@@ -84,6 +84,7 @@ enum {
+         DEACTIVATED,
+         AUTH_REQUEST_BEGIN,
+         AUTH_REQUEST_END,
++        SIG_LOCKED,
+         LAST_SIGNAL
+ };
+
+@@ -135,6 +136,7 @@ gs_manager_set_lock_active (GSManager *m
+                 for (l = manager->priv->windows; l; l = l->next) {
+                         gs_window_set_lock_enabled (l->data, lock_active);
+                 }
++                g_signal_emit (manager, signals [SIG_LOCKED], 0, lock_active);
+         }
+ }
+
+@@ -483,6 +485,17 @@ gs_manager_class_init (GSManagerClass *k
+                               g_cclosure_marshal_VOID__VOID,
+                               G_TYPE_NONE,
+                               0);
++        signals [SIG_LOCKED] =
++                g_signal_new ("locked",
++                              G_TYPE_FROM_CLASS (object_class),
++                              G_SIGNAL_RUN_LAST,
++                              G_STRUCT_OFFSET (GSManagerClass, locked),
++                              NULL,
++                              NULL,
++                              g_cclosure_marshal_VOID__BOOLEAN,
++                              G_TYPE_NONE,
++                              1,
++                              G_TYPE_BOOLEAN);
+
+         g_object_class_install_property (object_class,
+                                          PROP_ACTIVE,
+Index: budgie-screensaver/src/gs-manager.h
+===================================================================
+--- budgie-screensaver.orig/src/gs-manager.h
++++ budgie-screensaver/src/gs-manager.h
+@@ -50,6 +50,7 @@ typedef struct
+         void            (* deactivated)        (GSManager *manager);
+         void            (* auth_request_begin) (GSManager *manager);
+         void            (* auth_request_end)   (GSManager *manager);
++        void            (* locked)   (GSManager *manager, gboolean locked);
+
+ } GSManagerClass;
+
