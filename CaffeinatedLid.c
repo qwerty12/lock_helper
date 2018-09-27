@@ -16,9 +16,9 @@
 #include <libappindicator/app-indicator.h>
 
 static GApplication *app = NULL;
-static GDBusProxy *upower_proxy = NULL;
-static GDBusProxy *logind_proxy = NULL;
+static GDBusProxy *upower_proxy = NULL, *logind_proxy = NULL, *gs_proxy = NULL;
 static gint logind_fd = 0;
+static guint gs_inhibit_cookie = 0;
 static AppIndicator *indicator = NULL;
 static GtkWidget *start_menu_item = NULL;
 
@@ -83,12 +83,64 @@ static void pk_engine_uninhibit()
     g_debug("closed logind fd %i", logind_fd);
 }
 
+static void gnome_session_inhibit()
+{
+    g_autoptr(GVariant) res = NULL;
+
+    if (!gs_proxy)
+        return;
+
+    if (gs_inhibit_cookie != 0)
+        return;
+
+    res = g_dbus_proxy_call_sync(gs_proxy,
+                                "Inhibit",
+                                g_variant_new ("(susu)",
+                                               g_application_get_application_id(app),
+                                               0,
+                                               "Keep screen on",
+                                               4 | 8),
+                                G_DBUS_CALL_FLAGS_NONE,
+                                -1,
+                                NULL,
+                                NULL);
+
+    if (res)
+        g_variant_get(res, "(u)", &gs_inhibit_cookie);
+}
+
+static void gnome_session_uninhibit()
+{
+    g_autoptr(GVariant) res = NULL;
+
+    if (!gs_proxy)
+        return;
+
+    if (gs_inhibit_cookie == 0)
+        return;
+
+    res = g_dbus_proxy_call_sync(gs_proxy,
+                                "Uninhibit",
+                                g_variant_new ("(u)",
+                                               gs_inhibit_cookie),
+                                G_DBUS_CALL_FLAGS_NONE,
+                                -1,
+                                NULL,
+                                NULL);
+
+    gs_inhibit_cookie = 0;
+}
+
 static void pk_engine_toggleinhibition(GtkMenuItem *menuitem G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
 {
-    if (logind_fd == 0)
+    if (logind_fd == 0) {
         pk_engine_inhibit();
-    else
+        gnome_session_inhibit();
+    }
+    else {
         pk_engine_uninhibit();
+        gnome_session_uninhibit();
+    }
 }
 
 static void on_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_properties, GStrv invalidated_properties G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED) {
@@ -106,6 +158,7 @@ static void on_ac_connected(GDBusProxy *proxy G_GNUC_UNUSED, GVariant *changed_p
 
     if (ac_connected) {
         pk_engine_uninhibit();
+        gnome_session_uninhibit();
         return;
     }
 }
@@ -149,8 +202,10 @@ static void cleanup()
         app_indicator_set_status(indicator, APP_INDICATOR_STATUS_PASSIVE);
         g_clear_object(&indicator);
     }
+    gnome_session_uninhibit();
     pk_engine_uninhibit();
     g_clear_object(&logind_proxy);
+    g_clear_object(&gs_proxy);
     if (upower_proxy) {
         g_signal_handlers_disconnect_by_func(upower_proxy, on_ac_connected, NULL);
         g_clear_object(&upower_proxy);
@@ -178,6 +233,8 @@ static void activate(GApplication *app, gpointer user_data G_GNUC_UNUSED)
         g_printerr("Failed to obtain logind proxy\n");
         return;
     }
+
+    gs_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES | G_DBUS_PROXY_FLAGS_DO_NOT_CONNECT_SIGNALS, NULL, "org.gnome.SessionManager", "/org/gnome/SessionManager", "org.gnome.SessionManager", NULL, NULL);
 
     upower_init();
     indicator_init();
